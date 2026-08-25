@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:17
+    container_name: ledger_db
+    environment:
+      POSTGRES_DB: ledger
+      POSTGRES_USER: ledger_app
+      POSTGRES_PASSWORD: ledger_pass_123
+    ports:
+      - "5433:5432"
+    volumes:
+      - ledger_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger_app -d ledger"]
+      interval: 5s
+      retries: 5
+volumes:
+  ledger_pgdata:
