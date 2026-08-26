@@ -8,8 +8,25 @@ Migrations applied: V1–V4. Managed by Flyway, `src/main/resources/db/migration
 
 ## account
 
-> **TODO:** fill in from `V1__create_account.sql` — I don't have the file contents.
-> Run `\d account` in psql and paste the columns here.
+The chart of accounts. One row per account that postings can be made against.
+
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | `BIGINT` | no | identity | PK |
+| `code` | `VARCHAR(64)` | no | — | UNIQUE. Stable identifier, e.g. `MERCHANT_1_PAYABLE`. |
+| `name` | `VARCHAR(255)` | no | — | Human-readable label. |
+| `type` | `VARCHAR(16)` | no | — | `ASSET`, `LIABILITY`, `REVENUE`, `EXPENSE`. Determines sign convention. |
+| `currency` | `CHAR(3)` | no | — | ISO 4217. An account holds exactly one currency. |
+| `created_at` | `TIMESTAMPTZ` | no | `now()` | |
+
+**Indexes**
+
+- `account_pkey` — PK, automatic
+- `account_code_key` — UNIQUE constraint, automatic
+
+**Constraints**
+
+- `account_type_valid` — `CHECK (type IN ('ASSET', 'LIABILITY', 'REVENUE', 'EXPENSE'))`
 
 Referenced by `posting.account_id`.
 
@@ -63,7 +80,24 @@ One side of a transaction. A debit or a credit against one account.
 
 ---
 
+## Relationships
+
+```
+account (1) ──────< (N) posting (N) >────── (1) journal_entry
+```
+
+A journal entry has two or more postings. Each posting belongs to exactly one account and one journal entry.
+
+---
+
 ## Known inconsistencies
 
 - `posting_account_fk` has no explicit `ON DELETE`. Should be `RESTRICT` for consistency with the other FK. Fix in a future migration.
-- Index naming is inconsistent: `posting_account_index` vs `journal_entry_occurred_at_index` vs Postgres-generated `_pkey` / `_key`. Pick a convention before adding more.
+- Index naming is inconsistent: `posting_account_index` vs `journal_entry_occurred_at_index` vs Postgres-generated `_pkey` / `_key`. Settle a convention before adding more.
+- `currency` exists on both `account` and `posting`, with nothing enforcing that a posting's currency matches its account's. Only the service layer can catch a mismatch. Candidate for a composite FK or a trigger later.
+
+---
+
+## Open design question
+
+`account` has no owner column — no `merchant_id` or `tenant_id`. Multi-tenancy was in the original project scope. Decide whether tenancy is modelled by naming convention (`MERCHANT_1_PAYABLE`) or by a real foreign key, and record it in `DECISIONS.md` before the schema gets harder to change.
