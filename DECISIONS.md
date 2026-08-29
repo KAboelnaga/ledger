@@ -72,13 +72,15 @@ Consequence: there is no "fill this in later" step anywhere in the system. Every
 
 ---
 
-## ON DELETE RESTRICT on posting → journal_entry
+## ON DELETE RESTRICT
 
 `CASCADE` would silently delete every posting under a journal entry — that's how financial records get lost to a stray `DELETE`.
 
 `RESTRICT` over the `NO ACTION` default: `NO ACTION` can be deferred to end of transaction, so a delete-both-then-commit sequence could succeed. `RESTRICT` refuses immediately and can never be deferred.
 
 Given immutability, this should never fire in normal operation. It's a backstop against a bug or a careless hand at the psql prompt — the database enforcing what the application promises never to do.
+
+Layering these gives conditional behaviour no single constraint can express. `merchant ←RESTRICT— account ←— posting`: deleting a merchant requires deleting their accounts first, which is refused if those accounts have postings. So the sequence succeeds exactly when the merchant has no financial history, and fails when they do. In practice `status = 'BLOCKED'` is the real delete; hard deletion is for the merchant who signed up and never traded.
 
 ---
 
@@ -92,7 +94,7 @@ Selectivity, not just query frequency.
 
 Rule: index columns that are both frequently filtered/joined *and* selective. `currency` fails the second test — it'll appear in queries, but always alongside `account_id`, which does the real narrowing.
 
-`external_reference` needs no explicit index: `UNIQUE` creates one automatically, since enforcing uniqueness requires an index.
+`external_reference` needs no explicit index: `UNIQUE` creates one automatically, since enforcing uniqueness requires an index. Foreign keys get nothing automatically — a FK enforces existence, checked against the *target* table's PK index, so the referencing column is unindexed until you say otherwise.
 
 ---
 
@@ -102,4 +104,34 @@ Rule: index columns that are both frequently filtered/joined *and* selective. `c
 
 Migrations are versioned, reviewable, and replayable from an empty database. Flyway checksums every applied file and refuses to start if one changed — so **migrations are append-only**. Schema changes are new files (`ALTER TABLE`), never edits to old ones.
 
-This is why the `posting → journal_entry` FK is V4 rather than part of V2: `journal_entry` didn't exist yet when V2 ran.
+This is why the `posting → journal_entry` FK is V4 rather than part of V2: `journal_entry` didn't exist yet when V2 ran. And why adding `PENDING_VERIFICATION` to a `CHECK` is V6 dropping and recreating the constraint — a `CHECK` cannot be modified in place.
+
+---
+
+## Merchants own many accounts
+
+A merchant needs several accounts, not one: payable (settled balance owed), reserve (funds held against chargebacks), and one set per currency, since `account.currency` is single-valued. One account per merchant can't express any of this.
+
+Modelled as a real `merchant` table with `account.merchant_id` as a foreign key pointing at it. Rejected the naming-convention alternative (`MERCHANT_1_PAYABLE`) — it can't be joined, can't be indexed usefully, and breaks silently on a typo'd code.
+
+---
+
+## account.merchant_id is NOT NULL; the platform is a merchant
+
+The platform's own accounts — fee revenue, platform bank — don't belong to any customer. They belong to a seeded `PLATFORM` merchant, `id = 1`, created in V5.
+
+The alternative was a nullable column where null means platform-owned. Chose `NOT NULL` because every account then has a real owner and no query has to handle a null case.
+
+Cost, accepted: merchant-facing queries must exclude id 1, `status` is meaningless for that row, and the seed row has to live in the migration because the schema is unusable without it.
+
+---
+
+## merchant.status has no default
+
+`NOT NULL`, no default. New merchants are created `PENDING_VERIFICATION`; something must explicitly activate them.
+
+`DEFAULT 'ACTIVE'` would be convenient now and wrong later: the moment a real KYC step exists, a caller that forgets to set status silently marks an unverified merchant as active. That's a compliance failure, not a bug.
+
+The test is who owns the value. `created_at DEFAULT now()` is safe because the database is the authority on when a row was written. Status is decided by business logic — verification, risk checks — so the service layer owns it, and a database default would be the database overriding a decision that isn't its to make.
+
+Transitions are not enforced anywhere yet. Nothing stops `BLOCKED` → `ACTIVE`. Deliberate: the admin workflow is generic CRUD and adds nothing to what this project is demonstrating.
