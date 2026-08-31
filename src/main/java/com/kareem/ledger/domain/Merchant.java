@@ -23,6 +23,10 @@ public class Merchant {
 
     protected Merchant(){
     }
+    public Merchant(String name, MerchantStatus status){
+        this.name = name;
+        this.status = status;
+    }
 
     public Long getId(){
         return id;

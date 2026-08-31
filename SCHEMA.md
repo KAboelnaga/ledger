@@ -4,6 +4,8 @@ Current database state. **Overwrite this file when the schema changes — it is 
 
 Migrations applied: V1–V6. Managed by Flyway, `src/main/resources/db/migration/`.
 
+Mapped by JPA entities in `com.kareem.ledger.domain` under `ddl-auto=validate`. Hibernate verifies tables, columns, and JDBC type codes at startup — **not** nullability, defaults, `CHECK`, `UNIQUE`, or FK actions.
+
 ---
 
 ## merchant
@@ -39,7 +41,7 @@ The chart of accounts. One row per account that postings can be made against.
 | `code` | `VARCHAR(64)` | no | — | UNIQUE. Stable identifier, e.g. `MERCHANT_1_PAYABLE`. |
 | `name` | `VARCHAR(255)` | no | — | Human-readable label. |
 | `type` | `VARCHAR(16)` | no | — | `ASSET`, `LIABILITY`, `REVENUE`, `EXPENSE`. Determines sign convention. |
-| `currency` | `CHAR(3)` | no | — | ISO 4217. An account holds exactly one currency. |
+| `currency` | `CHAR(3)` | no | — | ISO 4217. An account holds exactly one currency. `CHAR` is deliberate — see below. |
 | `created_at` | `TIMESTAMPTZ` | no | `now()` | |
 | `merchant_id` | `BIGINT` | no | — | FK → `merchant.id`, `ON DELETE RESTRICT`. `1` = PLATFORM. |
 
@@ -53,6 +55,8 @@ The chart of accounts. One row per account that postings can be made against.
 
 - `account_type_valid` — `CHECK (type IN ('ASSET', 'LIABILITY', 'REVENUE', 'EXPENSE'))`
 - `account_merchant_fk` — FK to `merchant`, `ON DELETE RESTRICT`
+
+**On `CHAR(3)`:** fixed width is intentional, not an oversight. ISO 4217 codes are always exactly three characters, so Postgres' blank-padding of `CHAR(n)` can never fire. Requires `@JdbcTypeCode(SqlTypes.CHAR)` on the entity field — a plain `String` maps to `varchar` and fails schema validation.
 
 Referenced by `posting.account_id`.
 
@@ -88,7 +92,7 @@ One side of a transaction. A debit or a credit against one account.
 | `journal_entry_id` | `BIGINT` | no | — | FK → `journal_entry.id`, `ON DELETE RESTRICT` |
 | `account_id` | `BIGINT` | no | — | FK → `account.id` |
 | `amount` | `BIGINT` | no | — | Minor units. Signed: negative = credit, positive = debit. |
-| `currency` | `CHAR(3)` | no | — | ISO 4217 |
+| `currency` | `CHAR(3)` | no | — | ISO 4217. `CHAR`, as on `account`. |
 | `created_at` | `TIMESTAMPTZ` | no | `now()` | |
 
 **Indexes**
@@ -123,4 +127,4 @@ A journal entry has two or more postings. Each posting belongs to exactly one ac
 - `currency` exists on both `account` and `posting`, with nothing enforcing they match. Only the service layer can catch a mismatch. Fix: `UNIQUE (id, currency)` on `account` plus a composite FK on `(account_id, currency)`.
 - Index naming is inconsistent: `posting_account_index` vs `account_merchant_id_index` vs Postgres-generated `_pkey` / `_key`. Settle a convention before adding more.
 - Merchant status transitions are unenforced — nothing stops `BLOCKED` → `ACTIVE`. Deliberate; no admin workflow yet.
-- `V1__Create_account.sql` has a capital `C`, unlike every other migration. Cosmetic; Flyway records it in `description`.
+- ~~`V1__Create_account.sql` has a capital `C`~~ — renamed to lowercase. Required dropping the volume and replaying: Flyway stores the filename-derived description in `flyway_schema_history` and treats it as part of the migration's identity, so a rename fails validation exactly like an edit would.

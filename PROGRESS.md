@@ -24,9 +24,9 @@ Open a new chat with: *"Milestone N: <name>. See PROGRESS.md for method."*
 | 1 | Environment | Postgres in Docker, Flyway wired, app starts clean, repo pushed | done |
 | 2 | Schema V1–V4 | `account`, `posting`, `journal_entry` + FKs, rebuilds from empty DB | done |
 | 3 | Merchant + tenancy | `merchant` table, `account.merchant_id` FK, V5–V6 applied | done |
-| 4 | JPA entities | `Merchant`, `Account`, `JournalEntry`, `Posting` map cleanly; app starts with `ddl-auto=validate` | **next** |
-| 5 | Repositories + balance query | `SUM(amount)` balance returns correct value against seeded data | |
-| 6 | Service layer | One `@Transactional` method writes a balanced entry; unbalanced input is rejected | |
+| 4 | JPA entities | `Merchant`, `Account`, `JournalEntry`, `Posting` map cleanly; app starts with `ddl-auto=validate` | done |
+| 5 | Repositories + balance query | `SUM(amount)` balance returns correct value against seeded data | done |
+| 6 | Service layer | One `@Transactional` method writes a balanced entry; unbalanced input is rejected | **next** |
 | 7 | REST API + DTOs | `POST /journal-entries`, `GET /accounts/{id}/balance`; entities not exposed | |
 | 8 | Idempotency | Same `external_reference` twice → one entry, second returns the first | |
 | 9 | Reconciliation | Given a provider statement, report matched / missing / extra | |
@@ -50,19 +50,80 @@ Verified: full schema rebuilds from empty database via `docker compose down -v &
 
 ---
 
-## Next: milestone 4 — JPA entities
+## Entities
 
-Harder than SQL, and differently hard: annotations generate behaviour you can't see, lazy loading throws at unexpected moments, the object graph pretends the database isn't there. Knowing exactly what the tables look like is an advantage most people learning JPA don't have.
+`com.kareem.ledger.domain` — `Merchant`, `MerchantStatus`, `Account`, `AccountType`, `JournalEntry`, `Posting`.
 
-Questions to hit:
-- `long` vs `Long` for the id field, and why Hibernate cares
-- Relationship direction — does `Posting` reference `JournalEntry`, both ways, or neither
-- `FetchType.LAZY` vs `EAGER`, and where `LazyInitializationException` comes from
-- Why entities shouldn't be exposed over the API (DTOs come in milestone 7)
+App starts clean under `ddl-auto=validate` against all six migrations. Reasoning for every mapping choice is in `DECISIONS.md`; the short version:
 
-Debugging aid: `spring.jpa.show-sql=true` prints the SQL Hibernate actually generates. The gap between what you expected and what it sent is where the learning is.
+| | |
+|---|---|
+| ids | `Long` + `GenerationType.IDENTITY` |
+| enums | `@Enumerated(EnumType.STRING)` |
+| `TIMESTAMPTZ` | `Instant` |
+| `created_at` | `insertable = false, updatable = false` — database default owns it |
+| `CHAR(3)` | `@JdbcTypeCode(SqlTypes.CHAR)` — plain `String` fails validation |
+| relationships | `@ManyToOne(fetch = LAZY)` on `Account.merchant`, `Posting.journalEntry`, `Posting.account` |
+| collections | `JournalEntry.postings` only. `Merchant` has no `List<Account>`. |
+| constructors | `protected` no-arg for Hibernate; public one takes only caller-owned fields |
+
+Answered from the milestone 4 question list:
+
+- **`long` vs `Long`** — `Long` for ids (null distinguishes unsaved), `long` for `amount` (never legitimately absent)
+- **Relationship direction** — `Posting → JournalEntry` owns the FK; the inverse collection exists because entry + postings are one aggregate. `Merchant → Account` is one-directional for the opposite reason.
+- **`LAZY` vs `EAGER`** — LAZY everywhere; `LazyInitializationException` not yet encountered, expected once repositories exist and proxies outlive the context
+
+Every mapping above has now been exercised by a real INSERT — see milestone 5.
 
 ---
+
+## Milestone 5 — repositories + balance query (done)
+
+`com.kareem.ledger.repository`, four interfaces:
+
+| Repository | Extends | Methods |
+|---|---|---|
+| `AccountRepository` | `JpaRepository<Account, Long>` | inherited |
+| `MerchantRepository` | `JpaRepository<Merchant, Long>` | inherited |
+| `JournalEntryRepository` | `Repository<JournalEntry, Long>` | `save`, `findById` |
+| `PostingRepository` | `Repository<Posting, Long>` | `save`, `findById`, `balanceByAccountId` |
+
+Spring Data reported `Found 4 JPA repository interfaces` — the bare `Repository` marker is picked up by the scanner exactly like `JpaRepository`.
+
+A temporary `SeedRunner` (`CommandLineRunner`) wrote a merchant, two EGP accounts, and one balanced entry: six INSERTs, then the balance query returned 50000. Runner deleted; milestone 6 replaces it with a service method.
+
+Generated SQL for the balance:
+
+```sql
+select coalesce(sum(p1_0.amount),0) from posting p1_0 where p1_0.account_id=?
+```
+
+No join. `p.account.id` in JPQL resolves to the FK column already on `posting`; `p.account.code` would have forced one.
+
+**Confirmed by running, not by reading:**
+
+- `insertable = false` keeps `created_at` out of every INSERT, so `DEFAULT now()` fires
+- `cascade = PERSIST` writes the postings from a single `save(entry)` — `postingRepository.save()` was never called
+- `mappedBy` is the inverse side. A posting added to the collection but constructed with a null entry inserts with a null FK and dies on the not-null constraint — **not** an extra UPDATE. The FK value comes only from `Posting.journalEntry`.
+- Each `save()` opens and commits its own transaction. When the entry insert failed, the merchant and accounts stayed committed — a half-written ledger. This is what milestone 6 fixes.
+- `account.code` and `journal_entry.external_reference` being UNIQUE means the seed cannot run twice without `docker compose down -v`. Correct behaviour, and the mechanism milestone 8 is built on.
+
+Not yet met: `LazyInitializationException`. Nothing has loaded an entity and touched a proxy after the persistence context closed.
+
+---
+
+## Next: milestone 6 — service layer
+
+One `@Transactional` method that builds and writes a whole journal entry, validates sum-to-zero before committing, and rejects unbalanced input.
+
+Questions to hit:
+
+- What `@Transactional` actually does — where the proxy sits, and why calling a `@Transactional` method from inside the same class doesn't work
+- A factory method on `JournalEntry` that constructs a posting *and* adds it, closing the two gaps found in milestone 5
+- Where the sum-to-zero check lives and what it throws
+- Rollback semantics: which exceptions roll back by default, and which silently commit
+- The N+1 problem: what it looks like in the SQL log, and why LAZY `@ManyToOne` is where it comes from
+- Whether a balance read should return a projection or an entity, and why entities are the wrong answer
 
 ## Cleanup owed
 
@@ -72,3 +133,7 @@ Debugging aid: `spring.jpa.show-sql=true` prints the SQL Hibernate actually gene
 - Index naming convention is inconsistent — settle it before adding more
 - `ledger_pass_123` is plaintext in `application.properties` — move to env var / `.env`
 - Merchant status transitions unenforced — deferred deliberately, not forgotten
+- Audit log on `journal_entry.description` changes — it is the only mutable column; without a log, a typo fix is indistinguishable from rewriting history
+- `cascade = PERSIST` only reaches postings added via `addPosting`. A `Posting` constructed and never added is silently never written — and one added but constructed with a null entry is written *wrong*. Close both in milestone 6 with a single factory path.
+- `balanceByAccountId` returns 0 for a nonexistent account id, indistinguishable from an account with no postings. The REST layer must 404 on a bad id before asking for a balance.
+- `SeedRunner` deleted at the end of milestone 5. If anything like it comes back, it needs `@Profile("seed")` so it can't run in a normal startup.
