@@ -64,8 +64,10 @@ public class JournalEntry {
         this.description = description;
     }
 
-    public void addPosting(Posting posting){
+    public Posting addPosting(Account account, long amount, String currency){
+        Posting posting = new Posting(this, account, amount, currency);
         postings.add(posting);
+        return posting;
     }
 
     public List<Posting> getPostings(){
